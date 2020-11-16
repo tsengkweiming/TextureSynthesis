@@ -2,6 +2,7 @@
 using System.Collections.Generic;
 using UnityEngine;
 using Unity.Mathematics;
+using static Unity.Mathematics.math;
 using System.Linq;
 
 public class TextureSynthesis : MonoBehaviour
@@ -12,26 +13,31 @@ public class TextureSynthesis : MonoBehaviour
     protected Texture2D result;
     protected RenderTexture resultRT;
 
-    int searchKernelSize;
-    float truncation;
-    float attenuation;
-
     float errThreshold = 0.1f;
     float maxErrThreshold = 0.3f;
-    public int WindowSize;//odd default11
-    float halfWindow;
-    public int seedSize = 3;
-    public float Sigma = 6.4f;
+    public int WindowSize;//ODD ONLY
+    int seedSize = 3;
+    float Sigma = 6.4f;
 
-    [SerializeField] image paddedImg;
+    image paddedImg;
     image img;
     float[,] gaussianFilter;
-
-    float2[] test;
-    float[,] test2;
-    int countTest;
-    Matrix4x4 testM;
     bool found;
+    Texture2D dummyTexture;
+
+    int index;
+
+    int halfWindow;
+
+    int candidatesCountW;
+    int candidatesCountH;
+    image[,] candidates;
+
+    image Template;
+    float[,] GaussianMask;
+    float sumofWeight;
+    List<int2> UnfilledPixelList = new List<int2>();
+    public bool ImageNotFilled = true;
 
     public class image
     {
@@ -41,13 +47,14 @@ public class TextureSynthesis : MonoBehaviour
         public int[,] isFilledXY;
         public Color[,] colorXY;
         public Texture2D texture;
+        public int filledCount;
 
         public image(int size)
         {
             rowYCount = size;
             columnXCount = size;
             outputSize = size;
-            texture = new Texture2D(columnXCount, rowYCount);
+            //texture = new Texture2D(columnXCount, rowYCount);
             isFilledXY = new int[columnXCount, rowYCount];
             colorXY = new Color[columnXCount, rowYCount];
 
@@ -57,22 +64,24 @@ public class TextureSynthesis : MonoBehaviour
                 {
                     isFilledXY[m, n] = 0;
                     colorXY[m, n] = new Color(0, 0, 0, 0);
-                    texture.SetPixel(m, n, colorXY[m, n]);
+                    //texture.SetPixel(m, n, colorXY[m, n]);
                 }
             }
         }
 
+        int2 startindex;
         //resize image
         public image(image copyImgData, int2 centerIndex, int size)
         {
             rowYCount = size;
             columnXCount = size;
             outputSize = rowYCount;
-            texture = new Texture2D(columnXCount, rowYCount);
+            //texture = new Texture2D(columnXCount, rowYCount);
             isFilledXY = new int[columnXCount, rowYCount];
             colorXY = new Color[columnXCount, rowYCount];
+            filledCount = 0;
 
-            var startindex = new int2(centerIndex.x - (size - 1) / 2, centerIndex.y - (size - 1) / 2);
+            startindex = int2(centerIndex.x - (size - 1) / 2, centerIndex.y - (size - 1) / 2);
 
             for (int m = 0; m < columnXCount; m++)
             {
@@ -80,7 +89,8 @@ public class TextureSynthesis : MonoBehaviour
                 {
                     isFilledXY[m, n] = copyImgData.isFilledXY[startindex.x + m, startindex.y + n];
                     colorXY[m, n] = copyImgData.colorXY[startindex.x + m, startindex.y + n];
-                    texture.SetPixel(m, n, colorXY[m, n]);
+                    //texture.SetPixel(m, n, colorXY[m, n]);
+                    filledCount = filledCount + (isFilledXY[m, n] == 1 ? 1 : 0);
                 }
             }
         }
@@ -91,7 +101,7 @@ public class TextureSynthesis : MonoBehaviour
             rowYCount = copyImgData.rowYCount + windowSize - 1;
             columnXCount = copyImgData.columnXCount + windowSize - 1;
             outputSize = rowYCount;
-            texture = new Texture2D(columnXCount, rowYCount);
+            //texture = new Texture2D(columnXCount, rowYCount);
             isFilledXY = new int[columnXCount, rowYCount];
             colorXY = new Color[columnXCount, rowYCount];
 
@@ -99,9 +109,9 @@ public class TextureSynthesis : MonoBehaviour
             {
                 for (int n = 0; n < rowYCount; n++)
                 {
-                    isFilledXY[m, n] = 1;
+                    isFilledXY[m, n] = 100;
                     colorXY[m, n] = new Color(1, 0, 0, 1);
-                    texture.SetPixel(m, n, colorXY[m, n]);
+                    //texture.SetPixel(m, n, colorXY[m, n]);
                 }
             }
 
@@ -112,7 +122,7 @@ public class TextureSynthesis : MonoBehaviour
                 {
                     isFilledXY[j + offset, i + offset] = copyImgData.isFilledXY[j, i];
                     colorXY[j + offset, i + offset] = copyImgData.colorXY[j, i];
-                    texture.SetPixel(j + offset, i + offset, colorXY[j + offset, i + offset]);
+                    //texture.SetPixel(j + offset, i + offset, colorXY[j + offset, i + offset]);
                 }
             }
         }
@@ -138,28 +148,40 @@ public class TextureSynthesis : MonoBehaviour
                     texture.SetPixel(m, n, colorXY[m, n]);
                 }
             }
+            texture.Apply();
         }
     }
     // Start is called before the first frame update
     void Start()
     {
-        resultRT = new RenderTexture(OutputSize * 1, OutputSize, 24);
+        if (WindowSize % 2 == 0)
+            WindowSize = WindowSize + 1;
 
-        //Sigma = WindowSize / 6.4f;
+        resultRT = new RenderTexture(OutputSize, OutputSize, 24);
+        dummyTexture = new Texture2D(OutputSize, OutputSize);
 
         img = new image(OutputSize);
-        Rend.material.mainTexture = img.texture;
-        ApplySeedImage(sampleTextures[0], seedSize, ref img);
+        //Rend.material.mainTexture = img.texture;
+        ApplySeedImage(sampleTextures[0], seedSize, ref img, ref dummyTexture);
         paddedImg = new image(img, WindowSize);
-        paddedImg.texture.Apply();
+        //paddedImg.texture.Apply();
 
-        countTest = 0;
-        test = new float2[81];
-        test2 = new float[WindowSize, WindowSize];
         gaussianFilter = new float[WindowSize, WindowSize];
-        gaussianFilter = CalculateGaussianZ(WindowSize, WindowSize / Sigma);
+        gaussianFilter = CalculateGaussianZ(WindowSize, WindowSize / Sigma, 2);
 
-        GrowImage(gaussianFilter);
+        //GrowImage(gaussianFilter);
+
+        index = 0;
+
+        halfWindow = (WindowSize - 1) / 2;
+
+        candidatesCountW = sampleTextures[0].width - WindowSize + 1;
+        candidatesCountH = sampleTextures[0].height - WindowSize + 1;
+        candidates = new image[candidatesCountW, candidatesCountH];
+        GetCandidates(ref candidates, sampleTextures[0], WindowSize, candidatesCountW, candidatesCountH);
+
+        GaussianMask = new float[gaussianFilter.GetLength(0), gaussianFilter.GetLength(1)];
+        UnfilledPixelList = new List<int2>();
     }
 
     // Update is called once per frame
@@ -167,66 +189,45 @@ public class TextureSynthesis : MonoBehaviour
     {
         if (Input.GetKeyDown(KeyCode.A))
         {
-            Rend.material.mainTexture = paddedImg.texture;
-        }
-        if (Input.GetKeyDown(KeyCode.S))
-        {
-            Rend.material.mainTexture = img.texture;
+            var candidatesCountW = sampleTextures[0].width - WindowSize + 1;
+            var candidatesCountH = sampleTextures[0].height - WindowSize + 1;
+            image[,] candidates = new image[candidatesCountW, candidatesCountH];
+            GetCandidates(ref candidates, sampleTextures[0], WindowSize, candidatesCountW, candidatesCountH);
+
+            int countH = index / candidatesCountW;
+            ShowCandidates(candidates[index % candidatesCountW, countH * candidatesCountW]);
+
+            index++;
+            index %= candidatesCountH;
         }
 
         if (Input.GetKeyDown(KeyCode.E))
         {
             img = new image(OutputSize);
-            Rend.material.mainTexture = img.texture;
-            ApplySeedImage(sampleTextures[0], seedSize, ref img);
-            paddedImg = new image(img, WindowSize);
-            paddedImg.texture.Apply();
+            //Rend.material.mainTexture = img.texture;
+            //ApplySeedImage(sampleTextures[0], seedSize, ref img);
+            //paddedImg = new image(img, WindowSize);
+            //paddedImg.texture.Apply();
             //GrowImage(gaussFilter);
         }
 
-        if (Input.GetKeyDown(KeyCode.Z))
+        if (ImageNotFilled)
         {
-            //test[countTest % 100] = new float2(NextGaussian(0.13f), NextGaussian(0.13f));
-            //test[countTest % 81] = new float2(NextGaussian(WindowSize / Sigma), NextGaussian(WindowSize / Sigma));
-            //Gaussain2D(WindowSize, Sigma, ref test2);
-            countTest++;
-            //CalculateGaussianZ(ref test2, WindowSize, 0, 0, WindowSize / Sigma);
-        }
-    }
-
-    void GrowImage(float[,] gaussFilter)
-    { // img, paddedimg, gaussian, windowsize
-
-        //if (WindowSize % 2 == 0)
-        //    WindowSize = WindowSize + 1;
-        var halfWindow = (WindowSize - 1) / 2;
-
-        var sampleSize = sampleTextures[0].width;
-        //var sampleChannel = 4; //RGBA
-        var candidatesCountW = sampleTextures[0].width - WindowSize + 1;
-        var candidatesCountH = sampleTextures[0].height - WindowSize + 1;
-        image[,] candidates = new image[candidatesCountW, candidatesCountH];
-        GetCandidates(sampleTextures[0], WindowSize, candidatesCountW, candidatesCountH, ref candidates);
-
-        image Template;
-        float[,] GaussianMask = new float[gaussFilter.GetLength(0), gaussFilter.GetLength(1)];
-        List<int2> UnfilledPixelList = new List<int2>();
-
-        bool imageNotFilled = true;
-
-        while (imageNotFilled) {
             found = false;
             UnfilledPixelList = GetUnfilledNeighbors(img);
-            //gaussFilter = CalculateGaussianZ(WindowSize, WindowSize / Sigma);
 
             foreach (int2 p in UnfilledPixelList)
             {
-                Template = GetNeighborhood(paddedImg, p, WindowSize);
-                Normalize2D(ref GaussianMask, Template, gaussFilter);
-                FindMatches(Template, candidates, GaussianMask, p);
+                //break;
+                Template = GetNeighborhood(paddedImg, p, WindowSize, halfWindow);
+                sumofWeight = 0;
+                if (Template.filledCount != 0) {
+                    ApplyMask(ref GaussianMask, ref sumofWeight, Template, gaussianFilter);
+                    FindMatches(Template, candidates, candidatesCountW, candidatesCountH, GaussianMask, sumofWeight, p);
+                }
             }
 
-            imageNotFilled = UpdatePaddedImage(ref paddedImg, img, WindowSize);
+            UpdatePaddedImage(ref paddedImg, ref ImageNotFilled, img, WindowSize, halfWindow);
 
             if (!found)
             {
@@ -235,7 +236,7 @@ public class TextureSynthesis : MonoBehaviour
         }
     }
 
-    void ApplySeedImage(Texture2D sample, int seedSize, ref image img)
+    void ApplySeedImage(Texture2D sample, int seedSize, ref image img, ref Texture2D texture)
     {
         var row = sample.height;
         var column = sample.width;
@@ -246,22 +247,57 @@ public class TextureSynthesis : MonoBehaviour
 
         var seedPixels = sample.GetPixels(randCol, randRow, seedSize, seedSize);
 
-        //if (img.outputSize % 2 == 0)
-        //    img.outputSize = img.outputSize + 1;
         var startPt = (img.outputSize - 1) / 2 - (seedSize - 1) / 2;
 
         for (int i = 0; i < seedSize; i++)
         {
             for (int j = 0; j < seedSize; j++)
             {
-
-                img.texture.SetPixel(startPt + j, startPt + i, seedPixels[j + i * seedSize]);
+                texture.SetPixel(startPt + j, startPt + i, seedPixels[j + i * seedSize]);
                 img.isFilledXY[startPt + j, startPt + i] = 1;
                 img.colorXY[startPt + j, startPt + i] = seedPixels[j + i * seedSize];
             }
         }
-        img.texture.Apply();
+        texture.Apply();
     }
+
+    //void GrowImage(float[,] gaussFilter)
+    //{
+    //    var halfWindow = (WindowSize - 1) / 2;
+
+    //    var candidatesCountW = sampleTextures[0].width - WindowSize + 1;
+    //    var candidatesCountH = sampleTextures[0].height - WindowSize + 1;
+    //    image[,] candidates = new image[candidatesCountW, candidatesCountH];
+    //    GetCandidates(ref candidates, sampleTextures[0], WindowSize, candidatesCountW, candidatesCountH);
+
+    //    image Template;
+    //    float[,] GaussianMask = new float[gaussFilter.GetLength(0), gaussFilter.GetLength(1)];
+    //    float sumofWeight;
+    //    List<int2> UnfilledPixelList = new List<int2>();
+
+    //    bool imageNotFilled = true;
+
+    //    while (imageNotFilled)
+    //    {
+    //        found = false;
+    //        UnfilledPixelList = GetUnfilledNeighbors(img);
+
+    //        foreach (int2 p in UnfilledPixelList)
+    //        {
+    //            Template = GetNeighborhood(paddedImg, p, WindowSize, halfWindow);
+    //            sumofWeight = 0;
+    //            ApplyMask(ref GaussianMask, ref sumofWeight, Template, gaussFilter);
+    //            FindMatches(Template, candidates, candidatesCountW, candidatesCountH, GaussianMask, sumofWeight, p);
+    //        }
+
+    //        UpdatePaddedImage(ref paddedImg, ref imageNotFilled, img, WindowSize, halfWindow);
+
+    //        if (!found)
+    //        {
+    //            maxErrThreshold = maxErrThreshold * 1.1f;
+    //        }
+    //    }
+    //}
 
     List<int2> GetUnfilledNeighbors(image img)
     {
@@ -272,33 +308,36 @@ public class TextureSynthesis : MonoBehaviour
             for (int i = 0; i < img.rowYCount; i++)
             {
                 if (img.isFilledXY[j, i] == 0)
-                    unfilledList.Add(new int2(j, i));
+                    unfilledList.Add(int2(j, i));
             }
         }
         return unfilledList;
     }
 
-    image GetNeighborhood(image paddedOuputImage, int2 coord, int windowSize)
+    image GetNeighborhood(image paddedOuputImage, int2 coord, int windowSize, int halfWindowSize)
     {
-        var halfWindow = (windowSize - 1) / 2;
-        coord.x += halfWindow;
-        coord.y += halfWindow;
+        coord.x += halfWindowSize;
+        coord.y += halfWindowSize;
 
         image neighborhood = new image(paddedOuputImage, coord, windowSize);
         return neighborhood;
     }
 
-    image[,] GetCandidates(Texture2D sampleImage, int windowSize, int candidateH, int candidateV, ref image[,] candi)
+    void GetCandidates(ref image[,] candi, Texture2D sampleImage, int windowSize, int candidateH, int candidateV)
     { //for loop get every pixel candidate to compare with neiborhood to be filled
 
         for (int i = 0; i < candidateH; i++)
         {
             for (int j = 0; j < candidateV; j++)
             {
-                candi[i, j] = new image(sampleImage, new int2(i, j), windowSize);
+                candi[i, j] = new image(sampleImage, int2(i, j), windowSize);
             }
         }
-        return null;
+    }
+
+    void ShowCandidates(image candi)
+    {
+        Rend.material.mainTexture = candi.texture;
     }
 
     float[,] CalculateGaussianZ(int size, float sigma, float amp = 1.0f)
@@ -321,10 +360,11 @@ public class TextureSynthesis : MonoBehaviour
         return gaussianMat;
     }
 
-    float[,] Normalize2D(ref float[,] mask, image nbhd, float[,] gauss) {
+    void ApplyMask(ref float[,] mask, ref float sum, image nbhd, float[,] gauss)
+    {
 
-        float sum = 0;
-        for (int i = 0; i < nbhd.outputSize; i++) {
+        for (int i = 0; i < nbhd.outputSize; i++)
+        {
             for (int j = 0; j < nbhd.outputSize; j++)
             {
                 sum += nbhd.isFilledXY[i, j] * gauss[i, j];
@@ -335,25 +375,11 @@ public class TextureSynthesis : MonoBehaviour
         {
             for (int j = 0; j < nbhd.outputSize; j++)
             {
-                mask[i, j] = nbhd.isFilledXY[i, j] * gauss[i, j] / sum;
+                mask[i, j] = nbhd.isFilledXY[i, j] * gauss[i, j];
                 //test += gauss[i, j];
             }
         }
         //Debug.Log("sum " + test);
-        return mask;
-    }
-
-    void CalculateDistance(image nbhd, image candidate, float[,] gaussianMask) {
-
-        float diff = 0;
-        Vector4 temp = Vector4.zero;
-        for (int i = 0; i < nbhd.columnXCount; i++) {
-            for (int j = 0; j < nbhd.rowYCount; j++)
-            {
-                temp = candidate.colorXY[i, j] - nbhd.colorXY[i, j];
-                diff += Vector3.Magnitude(ToVector3(temp));
-            }
-        }
     }
 
     public static Vector3 ToVector3(Vector4 parent)
@@ -361,65 +387,53 @@ public class TextureSynthesis : MonoBehaviour
         return new Vector3(parent.x, parent.y, parent.z);
     }
 
-    void FindMatches(image neighborhood, image[,] candidates, float[,] gaussianMask, int2 coord)
+    void FindMatches(image neighborhood, image[,] candidates, int candidatesStepX, int candidatesStepY, float[,] gaussianMask, float weight, int2 coord)
     {
-        float[,] distances2D = new float[candidates.GetLength(0), candidates.GetLength(1)];
-        float[] distances = new float[candidates.GetLength(0)* candidates.GetLength(1)];
+        //float[,] distances2D = new float[candidatesStepX, candidatesStepY];
+        float[] distances = new float[candidatesStepX * candidatesStepY];
         Vector4 temp = Vector4.zero;
+        float diff;
 
-        for (int i = 0; i < candidates.GetLength(0); i++)           // get first dimension
+        for (int i = 0; i < candidatesStepX; i++)           // get first dimension
         {
-            for (int j = 0; j < candidates.GetLength(1); j++)       // get second dimension
+            for (int j = 0; j < candidatesStepY; j++)       // get second dimension
             {
-
-                float diff = 0;
+                diff = 0;
                 for (int m = 0; m < neighborhood.columnXCount; m++)
                 {
                     for (int n = 0; n < neighborhood.rowYCount; n++)
                     {
                         temp = candidates[i, j].colorXY[m, n] - neighborhood.colorXY[m, n];
-                        diff += ToVector3(temp).sqrMagnitude * gaussianMask[m, n];       //Vector3.Magnitude(ToVector3(temp));
+                        diff = diff + ToVector3(temp).sqrMagnitude * gaussianMask[m, n];
                     }
                 }
-
-                distances[i + j * candidates.GetLength(0)] = diff;
-                distances2D[i , j] = diff;
+                distances[i + j * candidatesStepX] = diff / weight;
+                //distances2D[i, j] = diff / weight;
             }
         }
-        
-        //float lowestTemp = distances2D[0, 0]; //whatever
-        //int2 index = new int2(0, 0);
-        //for (int i = 0; i < candidates.GetLength(0); i++)
-        //{
-        //    for (int j = 0; j < candidates.GetLength(1); j++)
-        //    {
-        //        if (lowestTemp > distances2D[i, j])
-        //        {
-        //            lowestTemp = distances2D[i, j];
-        //            index = new int2(i, j);
-        //        }
-        //    }
-        //}
+
         var minThreshold = distances.Min() * (1 + errThreshold);
-        //minThreshold *= 0;
         List<int2> minIndexs = new List<int2>();
 
-        for (int i = 0; i < candidates.GetLength(0); i++)
+        for (int i = 0; i < candidatesStepX; i++)
         {
-            for (int j = 0; j < candidates.GetLength(1); j++)
+            for (int j = 0; j < candidatesStepY; j++)
             {
-                if (distances2D[i, j] <= minThreshold)
+                //if (distances2D[i, j] <= minThreshold)
+                if (distances[i + j * candidatesStepX] <= minThreshold)
                 {
-                    //minIndexs.Add(i + j * candidates.GetLength(0));
-                    minIndexs.Add(new int2(i, j));
+                    //minIndexs.Add(i + j * candidatesStepX);
+                    minIndexs.Add(int2(i, j));
                 }
             }
         }
 
-        if (minIndexs.Count > 0) {
+        if (minIndexs.Count > 0)
+        {
             int randomPick = UnityEngine.Random.Range(0, minIndexs.Count);
             int2 selectedIndex = minIndexs[randomPick];
-            float selectedError = distances2D[selectedIndex.x, selectedIndex.y];
+            //float selectedError = distances2D[selectedIndex.x, selectedIndex.y];
+            float selectedError = distances[selectedIndex.x + selectedIndex.y * candidatesStepX];
 
             if (selectedError < maxErrThreshold)
             {
@@ -427,23 +441,25 @@ public class TextureSynthesis : MonoBehaviour
 
                 img.colorXY[coord.x, coord.y] = matchedPatch.colorXY[matchedPatch.outputSize / 2, matchedPatch.outputSize / 2];
                 img.isFilledXY[coord.x, coord.y] = 1;
-                img.texture.SetPixel(coord.x, coord.y, img.colorXY[coord.x, coord.y]);
-                img.texture.Apply();
+
+                dummyTexture.SetPixel(coord.x, coord.y, img.colorXY[coord.x, coord.y]);
+                dummyTexture.Apply();
+                Rend.material.mainTexture = dummyTexture;
 
                 found = true;
             }
         }
     }
 
-    bool UpdatePaddedImage(ref image pad, image source, int windowSize) {
-
-        var halfWindow = windowSize / 2;
+    void UpdatePaddedImage(ref image pad, ref bool notFullyFilled, image source, int windowSize, int halfWindowSize)
+    {
         int count = 0;
-        for (int i = 0; i < source.outputSize; i++) {
+        for (int i = 0; i < source.outputSize; i++)
+        {
             for (int j = 0; j < source.outputSize; j++)
             {
-                pad.isFilledXY[i + halfWindow, j + halfWindow] = source.isFilledXY[i, j];
-                pad.colorXY[i + halfWindow, j + halfWindow] = source.colorXY[i, j];
+                pad.isFilledXY[i + halfWindowSize, j + halfWindowSize] = source.isFilledXY[i, j];
+                pad.colorXY[i + halfWindowSize, j + halfWindowSize] = source.colorXY[i, j];
                 //pad.texture.SetPixel();
                 count += source.isFilledXY[i, j];
             }
@@ -451,108 +467,12 @@ public class TextureSynthesis : MonoBehaviour
 
         if (count < source.outputSize * source.outputSize)
         {
-            return true;
+            notFullyFilled = true;
         }
-        else {
-            return false;
-        }
-    }
-
-    float[,] Gaussain2D(int windowSize, float sigma, ref float[,] Gaussian)
-    {
-
-        for (int i = 0; i < windowSize; i++)
+        else
         {
-            for (int j = 0; j < windowSize; j++)
-            {
-                Gaussian[i, j] = NextGaussian(new float2((float)i / windowSize, (float)j / windowSize), windowSize / sigma);
-            }
+            notFullyFilled = false;
         }
-        return Gaussian;
-    }
-
-    public static float generateNormalRandom(float sigma, float mu)
-    {
-        float rand1 = UnityEngine.Random.Range(0.0f, 1.0f);
-        float rand2 = UnityEngine.Random.Range(0.0f, 1.0f);
-
-        float n = Mathf.Sqrt(-2.0f * Mathf.Log(rand1)) * Mathf.Cos((2.0f * Mathf.PI) * rand2);
-        float mean = (0 + 1) / 2.0f;
-
-        return (mean + sigma * n);
-    }
-
-    public static float RandomGaussian(float windowsize, float minValue = 0.0f, float maxValue = 1.0f) //stdeviation = windowSize / 6.4
-    {
-        float u, v, S;
-
-        do
-        {
-            u = 2.0f * UnityEngine.Random.value - 1.0f;
-            v = 2.0f * UnityEngine.Random.value - 1.0f;
-            S = u * u + v * v;
-        }
-        while (S >= 1.0f);
-
-        // Standard Normal Distribution
-        float std = u * Mathf.Sqrt(-2.0f * Mathf.Log(S) / S);
-
-        // Normal Distribution centered between the min and max value
-        // and clamped following the "three-sigma rule"
-        float mean = (minValue + maxValue) / 2.0f;
-        float sigma = (maxValue - mean) / 3.0f;
-
-        //stdeviation /= sigma;
-        //return Mathf.Clamp(std * sigma + mean, minValue, maxValue);
-        return Mathf.Clamp(std * Mathf.Sqrt(windowsize / 6.4f) + mean, minValue, maxValue);
-    }
-
-    public static float NextGaussian(float2 coord, float standard_deviation, float min = 0.0f, float max = 1.0f)
-    {
-        float x;
-        float mean = (min + max) / 2;
-        //do
-        //{
-        //    x = NextGaussian(coord, mean, standard_deviation);
-        //} while (x < min || x > max);
-        x = NextGaussian(coord, mean, standard_deviation);
-
-        return x;
-    }
-
-    public static float NextGaussian(float2 coord, float mean, float standard_deviation)
-    {
-        return mean + NextGaussian(coord) * standard_deviation;//0.1f;//
-    }
-
-    public static float NextGaussian(float2 coord)
-    {
-        float v1, v2, s;
-        //do
-        //{
-        //    v1 = 2.0f * UnityEngine.Random.Range(0f, 1f) - 1.0f;
-        //    v2 = 2.0f * UnityEngine.Random.Range(0f, 1f) - 1.0f;
-
-        //    s = v1 * v1 + v2 * v2;
-        //} while (s >= 1.0f || s == 0f);
-        v1 = 2 * coord.x - 1;
-        v2 = 2 * coord.y - 1;
-        s = v1 * v1 + v2 * v2;
-        s = Mathf.Sqrt((-2.0f * Mathf.Log(s)) / s);
-
-        return v1 * s;
-    }
-
-    int[] RndArray(int size)
-    {
-        int[] randomArray = new int[size];
-
-        for (int arrayIndex = 0; arrayIndex < randomArray.Length; arrayIndex++)
-        {
-            randomArray[arrayIndex] = UnityEngine.Random.Range(0, 1);
-        }
-
-        return randomArray;
     }
 
     void OnDrawGizmos()

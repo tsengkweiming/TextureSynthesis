@@ -1,0 +1,11 @@
+﻿#pragma kernel CSMain
+
+AppendStructuredBuffer<float3> buffer;
+float size;
+
+[numthreads(8, 8, 8)]
+void CSMain(uint3 id : SV_DispatchThreadID)
+{
+    float3 center = float3(id / size);
+    buffer.Append(center);
+}
